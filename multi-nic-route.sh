@@ -2,6 +2,7 @@
 
 set -e
 
+
 echo "======================================"
 echo " GCP Multi NIC IPv4 + IPv6 Routing"
 echo "======================================"
@@ -28,7 +29,7 @@ add_table(){
 
 
 # ===============================
-# IPv4 IPv6 forwarding
+# sysctl
 # ===============================
 
 cat >/etc/sysctl.d/99-gcp-route.conf <<EOF
@@ -65,11 +66,8 @@ done
 
 
 
-# ===============================
-# base
-# ===============================
-
 INDEX=0
+
 
 
 for IFACE in $(ls /sys/class/net | grep -E "^(ens|eth)")
@@ -90,9 +88,9 @@ echo "======================================"
 
 
 
-# ===============================
+# =================================================
 # IPv4
-# ===============================
+# =================================================
 
 
 IPV4=$(ip -4 addr show $IFACE \
@@ -105,9 +103,11 @@ IPV4=$(ip -4 addr show $IFACE \
 if [ -n "$IPV4" ]
 then
 
+
 GW4=$(echo $IPV4 | awk -F. '{print $1"."$2"."$3".1"}')
 
 
+echo ""
 echo "[IPv4]"
 echo "IP   : $IPV4"
 echo "GW   : $GW4"
@@ -139,7 +139,7 @@ priority $V4_PRIORITY \
 
 
 curl -4 \
---interface $IFACE \
+--interface $IPV4 \
 --max-time 5 \
 -s https://ifconfig.me \
 && echo " IPv4 OK" \
@@ -150,9 +150,10 @@ fi
 
 
 
-# ===============================
+
+# =================================================
 # IPv6
-# ===============================
+# =================================================
 
 
 IPV6_FULL=$(ip -6 addr show $IFACE \
@@ -183,22 +184,31 @@ add_table $V6_TABLE "${IFACE}-v6"
 
 
 
-# 获取GCP IPv6网关
+# =================================================
+# 获取 GCP IPv6 Gateway
+#
+# 支持:
+# default via xxxx
+# prefix nhid xxxx via xxxx
+# =================================================
 
-GW6=$(ip -6 route show dev $IFACE proto ra \
-| awk '/default/ {print $3}' \
-| head -n1)
-
-
-
-if [ -z "$GW6" ]
-then
 
 GW6=$(ip -6 route show dev $IFACE \
-| awk '/default/ && /via/ {print $3}' \
-| head -n1)
+| awk '
+/via/ {
+    for(i=1;i<=NF;i++)
+    {
+        if($i=="via")
+        {
+            print $(i+1)
+            exit
+        }
+    }
+}')
 
-fi
+
+
+echo "GW6  : ${GW6:-NONE}"
 
 
 
@@ -206,61 +216,84 @@ if [ -n "$GW6" ]
 then
 
 
-echo "GW6  : $GW6"
 
+# =================================================
+# 获取 IPv6 Prefix
+# =================================================
 
 
 PREFIX6=$(ip -6 route show dev $IFACE proto ra \
-| awk '/via/ {print $1}' \
+| awk '
+$1!="default" && /via/ {print $1}
+' \
 | head -n1)
+
 
 
 echo "PREFIX: ${PREFIX6:-NONE}"
 
 
 
+# 清空 IPv6 表
+
 ip -6 route flush table $V6_TABLE 2>/dev/null || true
 
 
 
-# 本机地址
+# =================================================
+# 本机IPv6地址
+# =================================================
+
 
 ip -6 route add \
-$IPV6/$MASK \
+$IPV6/128 \
 dev $IFACE \
 table $V6_TABLE \
 2>/dev/null || true
 
 
 
-# RA prefix
+# =================================================
+# GCP IPv6 Prefix
+# 必须 via gateway + onlink
+# =================================================
+
 
 if [ -n "$PREFIX6" ]
 then
+
 
 ip -6 route add \
 $PREFIX6 \
 via $GW6 \
 dev $IFACE \
 table $V6_TABLE \
+onlink \
 2>/dev/null || true
+
 
 fi
 
 
 
-# 默认IPv6
+# =================================================
+# IPv6 默认出口
+# =================================================
+
 
 ip -6 route add default \
 via $GW6 \
 dev $IFACE \
-onlink \
 table $V6_TABLE \
+onlink \
 2>/dev/null || true
 
 
 
-# policy
+# =================================================
+# IPv6 policy routing
+# =================================================
+
 
 ip -6 rule add \
 from $IPV6 \
@@ -269,6 +302,8 @@ priority $V6_PRIORITY \
 2>/dev/null || true
 
 
+
+echo "Testing IPv6..."
 
 curl -6 \
 --interface $IPV6 \
@@ -286,6 +321,7 @@ echo "IPv6 Gateway NONE"
 fi
 
 
+
 else
 
 echo "IPv6 NONE"
@@ -301,6 +337,7 @@ done
 
 
 
+
 echo ""
 echo "======================================"
 echo " IPv4 RULE"
@@ -309,12 +346,23 @@ echo "======================================"
 ip rule
 
 
+
 echo ""
 echo "======================================"
 echo " IPv6 RULE"
 echo "======================================"
 
 ip -6 rule
+
+
+
+echo ""
+echo "======================================"
+echo " ROUTE TABLES"
+echo "======================================"
+
+ip -6 route show table all
+
 
 
 echo ""
